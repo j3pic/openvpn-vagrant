@@ -1,0 +1,7 @@
+#!/bin/sh
+
+TARGET=$1
+CERT=$2
+KEY=$3
+
+sed "/<ca>/r rootCA.crt" client.ovpn.in | sed "/<cert>/r $CERT" | sed "/<key>/r $KEY" | sed 's/SERVER-IP/34.72.155.104/g' > $TARGET

@@ -1,0 +1,19 @@
+[req]
+distinguished_name = req_distinguished_name
+x509_extensions = v3_req
+prompt = no
+
+[req_distinguished_name]
+C = US
+ST = VA
+L = SomeCity
+O = Stockwell
+OU = Stockwell
+
+[v3_req]
+keyUsage = keyEncipherment, dataEncipherment
+extendedKeyUsage = serverAuth
+subjectAltName = "DNS:NAME,DNS:NAME"
+
+[alt_names]
+DNS.1 = NAME

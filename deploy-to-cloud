@@ -1,0 +1,233 @@
+#!/usr/bin/env ruby
+
+require 'shellwords'
+$stdin.reopen('/dev/null')
+
+$environment='staging'
+
+ARGV.each do |arg|
+  case arg
+  when '-d'
+    $delete = true
+  when '-prod'
+    $environment='production'
+  else
+    $bad_args=true
+  end
+end
+
+if $bad_args
+  STDERR.puts 'Usage: deploy-to-cloud [-d] [-prod]'
+  STDERR.puts "\tDeploy this repo's Vagrantfile to Google Cloud"
+  STDERR.puts '  -d delete previously-created Google Compute Engine VM instances.'
+  STDERR.puts '  -prod Deploy to production. Otherwise the deployment will be to staging.'
+  exit 1
+end
+
+$define_mode = true
+$deploy_to_cloud = true
+
+# TODO: Consider using the N2 machine family. These
+#       machines have faster CPUs.
+#
+# There's also a GPU-enabled machine family, which might be
+# good to use, since the demand forecaster uses
+# TensorFlow.
+
+# TODO: Consider using more RAM in production than locally.
+#       The Vagantfile has to take local memory limitations
+#       into account, while in prod we should be thinking about
+#       what's needed to handle the workload.
+
+$machine_types = { e2_standard_2: { cpus: 2,
+                                    ram_gb: 8,
+                                    n_disks: 128,
+                                    max_total_disk_tb: 257,
+                                    ssd: false,
+                                    max_egress_bandwidth_gbps: 4 },
+                   e2_highmem_2: { cpus: 2,
+                                   ram_gb: 16,
+                                   n_disks: 128,
+                                   max_total_disk_tb: 257,
+                                   ssd: false,
+                                   max_egress_bandwidth_gbps: 4 },
+                   e2_highmem_4: { cpus: 4,
+                                   ram_gb: 32,
+                                   n_disks: 128,
+                                   max_total_disk_tb: 257,
+                                   ssd: false,
+                                   max_egress_bandwidth_gbps: 8 },
+                   e2_highmem_8: { cpus: 8,
+                                   ram_gb: 64,
+                                   n_disks: 128,
+                                   max_total_disk_tb: 257,
+                                   ssd: false,
+                                   max_egress_bandwidth_gbps: 16 },
+                   e2_highmem_32: { cpus: 16,
+                                    ram_gb: 128,
+                                    n_disks: 128,
+                                    max_total_disk_tb: 257,
+                                    ssd: false,
+                                    max_egress_bandwidth_gbps: 16} }
+
+def machine_type_with_enough_ram(config)
+  ram_mb = config.vm.provider&.memory
+  return 'e2-standard-2' if ram_mb.nil?
+  ram_gb= ram_mb / 1024
+  $machine_types.find do |type, info|
+    info[:ram_gb] >= ram_gb
+  end.first.to_s.gsub('_', '-')
+end
+
+class Config
+  def initialize
+    @known_variables = {'include_in_prod' => true}
+  end
+  def define(key)
+    @defines ||= {}
+    @known_variables['defines'] = true
+    value = Config.new
+    yield value
+    @defines[key] = value
+  end
+  def include_in_production_deployment
+    @include_in_prod = true
+  end
+  def method_missing(name, *args)
+    if name.to_s.end_with? '='
+      self.instance_variable_set('@' + name.to_s[0..-2], args[0])
+      @known_variables[name.to_s[0..-2]] = true
+    elsif args.length > 0 || block_given?
+      self.instance_variable_set '@' + name.to_s,
+                                 if block_given?
+                                   value = self.class.new
+                                   yield value
+                                   value
+                                 else
+                                   args
+                                 end
+      @known_variables[name.to_s] = true
+      name.to_sym
+    else
+      if @known_variables[name.to_s]
+        self.instance_variable_get('@' + name.to_s)
+      elsif $define_mode
+        $last_self = self
+        self.send(name) do |c|
+          nil
+        end
+        self.send(name)
+      else
+        nil
+      end
+    end
+  end
+end
+
+class Vagrant
+  def self.configure(version)
+    $config = Config.new
+    yield($config)
+  end
+end
+
+load 'Vagrantfile'
+$define_mode = false
+
+$instance_ips_mutex = Mutex.new
+$instance_ips = {}
+
+$config.vm.defines.map do |name, config|
+  next unless config.include_in_prod
+  real_name = "#{$environment}-#{name}"
+  Thread.new do
+    disk_size = config.disksize&.size || "40GB"
+    if $delete
+      cmd = "gcloud compute instances delete -q #{real_name}"
+    else
+      system "gsutil rm gs://stockwell-deployment/boot-notifications/#{real_name}"
+      cmd = "gcloud compute instances create #{real_name} --boot-disk-size #{disk_size} " +
+            "--machine-type #{machine_type_with_enough_ram config} " +
+            "--scopes storage-rw,logging-write,monitoring,pubsub,cloud-platform " +
+            "--tags=openvpn-server " +
+            "--image=ubuntu-focal-deployment-notification "
+    end
+    puts "#{$delete ? 'Deleting' : 'Creating'} #{name}"
+    ip = `#{cmd} | ( read IGNORED; cat )`.strip.split.select do |token|
+      token.split('.').length == 4
+    end[0]
+    $instance_ips_mutex.synchronize do
+      puts "#{real_name}: #{ip}"
+      $instance_ips[name] = { ip: ip,
+                              real_name: real_name }
+    end
+  end
+end.compact.each(&:join)
+
+if not $delete
+  puts "All instances created. Generating Cloud Vagrant directory..."
+
+  wd=`pwd`.strip
+  basename=`basename #{wd}`.strip
+  system "rm -rf /tmp/#{basename} /tmp/vagrant"
+  system "gsutil -q -m rm -r gs://stockwell-deployment/prefect.tar.gz"
+  puts "Cloning #{wd}"
+  system "cd /tmp && git clone #{wd}"
+  puts "Creating hosts file"
+  File.open "/tmp/#{basename}/hosts", 'w' do |f|
+    $instance_ips.each do |name, info|
+      f.puts "#{info[:ip]}\t#{name}"
+    end
+  end
+  system "cp #{wd}/assigned-branch /tmp/#{basename}"
+  cmd="cd /tmp && cd #{basename} && rm -rf .git && cd .. && mv #{basename} vagrant && tar -czf prefect.tar.gz vagrant && gsutil -q cp prefect.tar.gz gs://stockwell-deployment/"
+  puts "Running command: #{cmd}"
+  system cmd
+  puts "Creating environment variable script"
+  File.open('/tmp/env', 'w') do |f|
+    env=case $environment
+        when "production"
+          "PRODUCTION"
+        when "staging"
+          "STAGING"
+        end
+    f.puts "export ENVIRONMENT=#{env}"
+    f.puts "export COMPOSER_DB=#{env}"
+  end
+  system "gsutil rm gs://stockwell-deployment/environments/#{$environment}"
+  system "gsutil cp /tmp/env gs://stockwell-deployment/environments/#{$environment}"
+  puts "Waiting for all machines to boot up."
+  loop do
+    hosts_up = `gsutil ls gs://stockwell-deployment/boot-notifications/`.split("\n").map do |path|
+      path.split('/').last
+    end
+    if ($instance_ips.map do |name, info|
+          info[:real_name]
+        end.all? do |name|
+          hosts_up.include?(name) || puts("Waiting for #{name}")
+        end)
+      break
+    else
+      sleep 5
+    end
+  end
+  puts "All machines are up! Giving Google's provisioning scripts time to finish..."
+  sleep 90
+  puts "OK. Now running the Vagrant provision scripts."
+  $instance_ips.map do |name, info|
+    Thread.new do
+      puts "#{name}: Creating vagrant user"
+      system "instance-shell #{info[:real_name]} 'sudo useradd -G sudo vagrant'"
+      puts "Copying Vagrant directory to #{info[:real_name]}"
+      system "instance-shell #{info[:real_name]} 'sudo /snap/bin/gsutil -q -m cp -Z gs://stockwell-deployment/prefect.tar.gz /tmp && cd /tmp && tar -xzf prefect.tar.gz && sudo mv vagrant / && sudo chown -R vagrant /vagrant'"
+      puts "#{name} killing 'unattended-upgrade'"
+      system("instance-shell #{info[:real_name]} sudo killall -9 unattended-upgrade")
+      script = '/vagrant/' + $config.vm.defines[name].vm.provision[1][:path]
+      puts "#{name}: Running provision script at #{script}"
+      system("instance-shell #{info[:real_name]} '/vagrant/run-provision-script.sh #{script} gs://stockwell-deployment/environments/#{$environment}' > /tmp/#{name}.log 2>&1") ||
+        begin
+          puts "Provision script failed for #{name}. See /tmp/#{name}.log for details."
+        end
+    end
+  end.each(&:join)
+end

@@ -1,0 +1,16 @@
+[Unit]
+Description=OpenVPN server
+After=network.target
+
+[Service]
+Restart=always
+RestartSec=0
+ExecStart=/etc/openvpn-server/run-openvpn-server.sh
+TimeoutStopSec=5
+
+User=root
+Group=root
+
+[Install]
+WantedBy=default.target
+

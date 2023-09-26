@@ -1,0 +1,12 @@
+#!/bin/bash
+
+if [ -z "$1" ]; then
+	echo 'Usage: genkey <device-name>' 1>&2
+	exit 1
+fi
+
+if [[ "$1" == -* ]]; then
+	echo device-name cannot begin with dash 1>&2
+	exit 1
+fi
+/usr/bin/sudo $HOME/genkey.root $1
