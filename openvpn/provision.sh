@@ -3,11 +3,19 @@
 set -e -o pipefail
 set -x
 
+if [ -e /env ]; then
+  . /env
+else
+  export ENVIRONMENT=VAGRANT
+fi
+
 apt-get update
 apt-get install -yqq openvpn openssl build-essential make net-tools
 apt-get remove -yqq command-not-found
 
-cat /vagrant/hosts >> /etc/hosts
+if [ "$ENVIRONMENT" = VAGRANT ]; then
+  cat /vagrant/hosts >> /etc/hosts
+fi
 
 cd /vagrant/tls
 make 
