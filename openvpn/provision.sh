@@ -7,6 +7,8 @@ apt-get update
 apt-get install -yqq openvpn openssl build-essential make net-tools
 apt-get remove -yqq command-not-found
 
+cat /vagrant/hosts >> /etc/hosts
+
 cd /vagrant/tls
 make 
 mkdir /etc/openvpn-server
