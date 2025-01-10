@@ -5,8 +5,9 @@ if [ -z "$1" ]; then
 	exit 1
 fi
 
-if [[ "$1" == -* ]]; then
-	echo device-name cannot begin with dash 1>&2
-	exit 1
+if ( echo "$1" | /usr/bin/grep '[^-a-z0-9_]' ) >/dev/null 2>&1 || [[ "$1" == -* ]]; then
+        echo Invalid device-name 1>&2
+        exit 1;
 fi
-/usr/bin/sudo $HOME/genkey.root $1
+
+/usr/bin/sudo $HOME/bin/genkey.root $1

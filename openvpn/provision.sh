@@ -29,4 +29,4 @@ service openvpn-server start
 cp -fdR /vagrant/newuser /home
 useradd -d /home/newuser -s /bin/rbash -M newuser
 chown -R newuser.newuser /home/newuser
-echo 'newuser ALL=NOPASSWD:/home/newuser/genkey.root' >> /etc/sudoers
+echo 'newuser ALL=NOPASSWD:/home/newuser/bin/genkey.root' >> /etc/sudoers
